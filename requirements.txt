@@ -1,0 +1,11 @@
+# Imported third-party dependencies. Versions are intentionally unpinned.
+numpy
+pyttsx3
+requests
+sounddevice
+webrtcvad-wheels
+scipy
+faster-whisper
+openwakeword
+# Selected inference backend used by openWakeWord on Windows.
+onnxruntime

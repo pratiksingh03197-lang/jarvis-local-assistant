@@ -1,0 +1,38 @@
+# Python and local environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Downloaded/custom model weights and caches
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.bin
+models/
+.cache/
+
+# Recordings, debug output, and development backups
+*.wav
+*.mp3
+*.flac
+*.log
+logs/
+recordings/
+jarvis_backup.py
+jarvis_before_*.py
+*.bak
+
+# Editor and operating-system files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
