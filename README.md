@@ -18,20 +18,7 @@ JARVIS connects speech recognition, local language-model conversations, spoken r
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[Microphone] --> B[Wake detection]
-    B --> C[Adaptive command capture]
-    C --> D[Local Whisper transcription]
-    D --> E[Transcript checks]
-    E --> F{Command router}
-    F --> G[Fixed Windows actions]
-    F --> H[Confirmed browser search]
-    F --> I[Local Ollama conversation]
-    G --> J[Spoken response]
-    H --> J
-    I --> J
-```
+![JARVIS voice pipeline](docs/architecture.svg)
 
 **Stack:** Python · faster-whisper · openWakeWord / ONNX Runtime · Ollama · WebRTC VAD · sounddevice · NumPy · SciPy · pyttsx3
 
