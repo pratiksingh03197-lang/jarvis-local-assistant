@@ -1,6 +1,6 @@
 # =====================================================
 # PROJECT JARVIS - PERSONAL AI ASSISTANT
-# VERSION 4.0
+# VERSION 4.1
 # Local wake word + Hindi/English/Hinglish ASR
 # Safe, allowlisted Windows actions
 # =====================================================
@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote_plus
+
+from serpapi_live_search import (
+    SearchDemoError,
+    detect_response_language,
+    search_and_summarize,
+)
 
 import numpy as np
 import pyttsx3
@@ -125,6 +131,9 @@ assistance. You do not execute operating-system commands, browse private data,
 send messages, change files, or control the computer. The Python safety layer
 handles a very small, explicit allowlist of computer actions separately.
 
+Web searches are handled separately through SerpApi only after the user gives
+spoken confirmation. Do not claim that you searched the web without results.
+
 Never claim that a computer action happened unless it was completed. Do not use
 Markdown in spoken responses.
 """
@@ -132,8 +141,8 @@ Markdown in spoken responses.
 TRANSCRIPTION_PROMPT = (
     "This is a spoken personal-assistant command in Hindi, English, or Hinglish. "
     "Transcribe exactly; do not translate. Keep names and app names as spoken. "
-    "Common words: Jarvis, Notepad, Calculator, Google, YouTube, खोलो, "
-    "कैलकुलेटर, नोटपैड."
+    "Common words: Jarvis, Notepad, Calculator, Google, YouTube, SerpApi, "
+    "search the web, खोलो, खोजो, कैल्कुलेटर, नोटपैड."
 )
 
 conversation_history: list[dict[str, str]] = []
@@ -832,8 +841,45 @@ def recognize_speech(
 @dataclass(frozen=True)
 class PendingAction:
     description: str
-    url: str
+    url: Optional[str]
     expires_at: float
+    action: str = "browser"
+    query: Optional[str] = None
+    response_language: str = "en"
+
+
+def _extract_web_search_query(user_text: str) -> Optional[str]:
+    """Recognize an explicit live-web search request in English or Hindi."""
+    command = normalize_command(user_text)
+    patterns = (
+        r"^(?:search|find|look up)\s+(?:the\s+)?(?:web|internet|online)(?:\s+for)?\s+(.+)$",
+        r"^(?:search|find)\s+(.+?)\s+(?:on|across)\s+(?:the\s+)?(?:web|internet)$",
+        r"^(?:web|internet)\s+(?:par|pe)\s+(?:search(?:\s+karo)?|khojo|dhoondho|dhundho|dhoondo|dhundo)\s+(.+)$",
+        r"^(?:वेब|इंटरनेट)\s+(?:पर|पे)\s+(?:सर्च\s+करो|खोजो|ढूँढो|ढूंढो|ढूंढें)\s+(.+)$",
+        r"^(?:hindi\s+mein|hindi\s+me)\s+(?:search\s+karo|khojo|dhundho|dhoondo)\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, command, flags=re.IGNORECASE)
+        if match:
+            query = match.group(1).strip()
+            query = re.sub(
+                r"\s+(?:in\s+hindi|hindi\s+mein|hindi\s+me|हिंदी\s+में|हिन्दी\s+में|in\s+english|english\s+mein|english\s+me)$",
+                "",
+                query,
+                flags=re.IGNORECASE,
+            )
+            return query.strip()
+    return None
+
+
+def _show_search_sources(sources: list) -> None:
+    print("\nWEB SOURCES — open links only if you choose to:")
+    for index, source in enumerate(sources, start=1):
+        print(
+            f"[{index}] {source.title}\n"
+            f"    {source.url}\n"
+            f"    {source.snippet}"
+        )
 
 
 def normalize_command(text: str) -> str:
@@ -941,6 +987,11 @@ def _extract_youtube_video_query(command: str) -> Optional[str]:
     """
     if "youtube" not in command or "video" not in command:
         return None
+    if re.search(
+        r"\b(?:search|find|look\s+up)\s+(?:the\s+)?(?:web|internet|online)\b",
+        command,
+    ):
+        return None
 
     match = re.search(
         r"\b(?:find|search(?:\s+for)?|look\s+for|show)\s+"
@@ -975,6 +1026,13 @@ def control_computer(
             pending = None
             print("The pending action expired.")
         elif _is_yes(command):
+            if pending.action == "serpapi":
+                if not pending.query:
+                    return "I could not read that search question. Please try again.", None
+                return (
+                    run_serpapi_search(pending.query, pending.response_language),
+                    None,
+                )
             if _open_allowed_url(pending.url):
                 return f"Confirmed. {pending.description}", None
             return "I could not open the browser.", None
@@ -1020,8 +1078,9 @@ def control_computer(
     if command in {"computer controls", "voice controls", "help controls"}:
         return (
             "You can ask me to open Chrome, Notepad, Calculator, File Explorer, "
-            "Settings, the JARVIS folder, Google, or YouTube. For a YouTube video "
-            "search, I will ask before sending the words to YouTube.",
+            "Settings, the JARVIS folder, Google, or YouTube. Say search the web "
+            "for, and I will ask before sending the question to SerpApi. For a "
+            "YouTube search, I will also ask first.",
             None,
         )
 
@@ -1045,6 +1104,25 @@ def control_computer(
                 description=f"Searching YouTube for {video_query}.",
                 url=url,
                 expires_at=now + 30.0,
+            ),
+        )
+
+    web_query = _extract_web_search_query(user_text)
+    if web_query:
+        language = detect_response_language(user_text)
+        language_name = "Hindi" if language == "hi" else "English"
+        return (
+            f"I can search the web for {web_query} through SerpApi and summarize "
+            f"the results in {language_name}. This sends your search words to "
+            "SerpApi and its search provider. Wake me again, then say yes to "
+            "continue or no to cancel.",
+            PendingAction(
+                description=f"Searching the web for {web_query}.",
+                url=None,
+                expires_at=now + 30.0,
+                action="serpapi",
+                query=web_query,
+                response_language=language,
             ),
         )
 
@@ -1088,6 +1166,29 @@ def control_computer(
             )
 
     return None, None
+
+
+def run_serpapi_search(query: str, language: str) -> str:
+    """Run an already-confirmed search and return a short spoken response."""
+    try:
+        answer, sources = search_and_summarize(
+            query,
+            language,
+            model=AI_MODEL,
+            ollama_url=OLLAMA_URL,
+        )
+    except SearchDemoError as error:
+        return str(error)
+
+    _show_search_sources(sources)
+    print("\nJARVIS SEARCH ANSWER:")
+    print(answer)
+    spoken_answer = re.sub(r"\[(\d+)\]", r"source \1", answer)
+    if language == "hi":
+        return f"{spoken_answer} स्रोतों के लिंक स्क्रीन पर दिख रहे हैं।"
+    return f"{spoken_answer} The source links are shown on screen."
+
+
 # =====================================================
 # LOCAL AI AND SPEECH
 # =====================================================
@@ -1104,11 +1205,72 @@ def speak(voice: pyttsx3.Engine, text: str) -> None:
         return
 
     print(f"\nJARVIS: {text}")
+    default_voice_id = None
     try:
+        default_voice_id = voice.getProperty("voice")
+        if re.search(r"[\u0900-\u097f]", text):
+            for candidate in voice.getProperty("voices"):
+                voice_details = " ".join(
+                    [
+                        str(getattr(candidate, "id", "")),
+                        str(getattr(candidate, "name", "")),
+                        " ".join(str(item) for item in getattr(candidate, "languages", [])),
+                    ]
+                )
+                if re.search(r"hindi|\bhi[_-][a-z]{2}\b", voice_details, re.IGNORECASE):
+                    voice.setProperty("voice", candidate.id)
+                    break
         voice.say(text)
         voice.runAndWait()
     except Exception as error:
         print(f"Text-to-speech error: {error}")
+    finally:
+        if default_voice_id:
+            try:
+                voice.setProperty("voice", default_voice_id)
+            except Exception:
+                pass
+
+
+def run_typed_search_demo() -> int:
+    """Run the live-search flow without a microphone for a reliable demo."""
+    try:
+        voice = make_voice()
+    except Exception as error:
+        print(f"Text-to-speech setup error: {error}")
+        return 2
+
+    print("\nJARVIS + SERPAPI LIVE SEARCH DEMO")
+    print("Type a question in English or Hindi. Type 'quit' to leave.")
+    print("JARVIS will ask before sending each question to SerpApi.")
+    while True:
+        try:
+            question = input("\nYour question: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nDemo closed.")
+            return 0
+
+        if question.casefold() in {"quit", "exit", "q"}:
+            print("Demo closed.")
+            return 0
+        if not question:
+            continue
+
+        language = detect_response_language(question)
+        print(
+            "This will send your question to SerpApi and its search provider. "
+            "The result excerpts will be summarized by your local Ollama model."
+        )
+        try:
+            confirmation = input("Continue? Type yes to search, or no to cancel: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nDemo closed.")
+            return 0
+        if normalize_command(confirmation) not in {"yes", "y", "haan", "हाँ", "हां"}:
+            print("Canceled. No search request was sent.")
+            continue
+
+        speak(voice, run_serpapi_search(question, language))
 
 
 def ask_jarvis(user_text: str) -> str:
@@ -1196,6 +1358,11 @@ def parse_arguments() -> argparse.Namespace:
         description="Local JARVIS with safer microphone and Windows controls."
     )
     parser.add_argument(
+        "--search-demo",
+        action="store_true",
+        help="Run the typed SerpApi live-search demo without the microphone.",
+    )
+    parser.add_argument(
         "--list-devices",
         action="store_true",
         help="List microphone inputs without recording audio.",
@@ -1252,6 +1419,9 @@ def main() -> int:
         list_microphones()
         return 0
 
+    if args.search_demo:
+        return run_typed_search_demo()
+
     try:
         mic = choose_microphone(args.mic)
     except Exception as error:
@@ -1259,7 +1429,7 @@ def main() -> int:
         return 2
 
     print("\n===================================")
-    print("       JARVIS AI SYSTEM v4.0")
+    print("       JARVIS AI SYSTEM v4.1")
     print("===================================")
     print(
         f"Selected microphone: [{mic.index}] {mic.name} | {mic.hostapi} | "
@@ -1293,7 +1463,7 @@ def main() -> int:
 
     print("\nJARVIS IS ONLINE")
     print("Features: wake word, adaptive recording, Hindi/English/Hinglish ASR,")
-    print("local Ollama chat, and limited safe computer control.")
+    print("local Ollama chat, confirmed SerpApi search, and safe computer control.")
     print("Wake options: 'Jarvis' (local speech fallback) or 'Hey Jarvis'.")
     print("Press Ctrl+C to stop JARVIS.")
 
