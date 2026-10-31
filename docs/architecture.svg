@@ -1,22 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc">
-  <title id="title">JARVIS voice pipeline</title>
-  <desc id="desc">Microphone and wake detection lead to adaptive capture, local transcription and checks. The router chooses fixed Windows actions, confirmed browser search or local Ollama chat, then speaks the response.</desc>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10" fill="#6e9ab5"/></marker></defs>
-  <rect width="1000" height="380" rx="16" fill="#101e2e"/>
-  <text x="35" y="40" fill="#8fe3cf" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="2">JARVIS / VOICE PIPELINE</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="420" viewBox="0 0 1100 420" role="img" aria-labelledby="title desc">
+  <title id="title">JARVIS voice and live-search pipeline</title>
+  <desc id="desc">The microphone, wake detector, local transcription and command router lead to safe computer actions, confirmed browser search, confirmed SerpApi live search or local Ollama chat. SerpApi results are summarized locally and shown with numbered source links.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10" fill="#6e9ab5"/></marker>
+  </defs>
+  <rect width="1100" height="420" rx="18" fill="#101e2e"/>
+  <text x="38" y="42" fill="#8fe3cf" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="600" letter-spacing="2">JARVIS / VOICE + LIVE SEARCH</text>
   <g fill="#19334a" stroke="#3c5a73" stroke-width="1.5">
-    <rect x="35" y="76" width="190" height="66" rx="10"/><rect x="280" y="76" width="190" height="66" rx="10"/><rect x="525" y="76" width="190" height="66" rx="10"/><rect x="770" y="76" width="195" height="66" rx="10"/>
-    <rect x="65" y="225" width="240" height="66" rx="10"/><rect x="380" y="225" width="240" height="66" rx="10"/><rect x="695" y="225" width="240" height="66" rx="10"/>
+    <rect x="35" y="72" width="200" height="72" rx="11"/>
+    <rect x="300" y="72" width="200" height="72" rx="11"/>
+    <rect x="565" y="72" width="220" height="72" rx="11"/>
+    <rect x="845" y="72" width="220" height="72" rx="11"/>
+    <rect x="35" y="250" width="220" height="72" rx="11"/>
+    <rect x="300" y="250" width="220" height="72" rx="11"/>
+    <rect x="565" y="250" width="220" height="72" rx="11" stroke="#3da9a4"/>
+    <rect x="830" y="250" width="235" height="72" rx="11"/>
   </g>
-  <g fill="none" stroke="#6e9ab5" stroke-width="2" marker-end="url(#arrow)"><path d="M225 109H276"/><path d="M470 109H521"/><path d="M715 109H766"/><path d="M867 142V182H185V221"/><path d="M867 182H500V221"/><path d="M867 182H815V221"/></g>
+  <g fill="none" stroke="#6e9ab5" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M235 108H296"/><path d="M500 108H561"/><path d="M785 108H841"/>
+    <path d="M955 144V190H145V246"/><path d="M955 190H410V246"/>
+    <path d="M955 190H675V246"/><path d="M955 190V246"/>
+    <path d="M785 286H826"/>
+  </g>
   <g fill="#f1f7fc" font-family="Segoe UI,Arial,sans-serif" font-size="17" text-anchor="middle">
-    <text x="130" y="104">Microphone</text><text x="130" y="127" fill="#a7c1d5" font-size="14">Wake detection</text>
-    <text x="375" y="104">Adaptive capture</text><text x="375" y="127" fill="#a7c1d5" font-size="14">VAD + audio processing</text>
-    <text x="620" y="104">Local transcription</text><text x="620" y="127" fill="#a7c1d5" font-size="14">Whisper + transcript checks</text>
-    <text x="867" y="115">Command router</text>
-    <text x="185" y="253">Fixed Windows actions</text><text x="185" y="277" fill="#a7c1d5" font-size="14">Allowlisted app launches</text>
-    <text x="500" y="253">Confirmed browser search</text><text x="500" y="277" fill="#a7c1d5" font-size="14">Google / YouTube</text>
-    <text x="815" y="253">Local Ollama chat</text><text x="815" y="277" fill="#a7c1d5" font-size="14">Conversation on this computer</text>
-    <text x="500" y="344" fill="#8fe3cf">Spoken response via the installed Windows voice</text>
+    <text x="135" y="102">Microphone</text><text x="135" y="127" fill="#a7c1d5" font-size="14">Wake detection</text>
+    <text x="400" y="102">Adaptive capture</text><text x="400" y="127" fill="#a7c1d5" font-size="14">VAD + audio processing</text>
+    <text x="675" y="102">Local transcription</text><text x="675" y="127" fill="#a7c1d5" font-size="14">Whisper + transcript checks</text>
+    <text x="955" y="102">Command router</text><text x="955" y="127" fill="#a7c1d5" font-size="14">Explicit, bounded actions</text>
+    <text x="145" y="279">Windows actions</text><text x="145" y="304" fill="#a7c1d5" font-size="14">Fixed app allowlist</text>
+    <text x="410" y="279">Browser search</text><text x="410" y="304" fill="#a7c1d5" font-size="14">Google / YouTube, confirmed</text>
+    <text x="675" y="279">SerpApi live search</text><text x="675" y="304" fill="#a7c1d5" font-size="14">Only after confirmation</text>
+    <text x="947" y="279">Local Ollama</text><text x="947" y="304" fill="#a7c1d5" font-size="14">Chat + cited result summary</text>
+    <text x="550" y="380" fill="#8fe3cf">JARVIS speaks the answer · Numbered source links stay visible · Search results are never opened automatically</text>
   </g>
 </svg>
