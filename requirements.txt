@@ -2,6 +2,10 @@
 numpy
 pyttsx3
 requests
+# Optional cloud speech recognition and chat for online mode.
+google-genai
+edge-tts
+miniaudio
 sounddevice
 webrtcvad-wheels
 scipy
@@ -9,3 +13,4 @@ faster-whisper
 openwakeword
 # Selected inference backend used by openWakeWord on Windows.
 onnxruntime
+
