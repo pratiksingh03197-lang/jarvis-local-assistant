@@ -75,7 +75,7 @@ Gemini online mode sends an in-memory WAV of the activated command directly in t
 
 Double-click `Open_JARVIS_App.cmd` for the desktop interface. Close any existing JARVIS console first so only one copy listens to the microphone. Select **Start listening** to start online voice mode; **Stop** stops the voice process. Closing the window also stops the process started by that window. Activity text remains in the window only for that session.
 
-You can also type into the message box and press **Send**. Typed messages use Gemini online and retain a short conversation history for the current window. Typed commands use the existing local allowlist, with typed yes/no confirmation for searches. Typed and voice sessions currently have separate conversation histories and confirmations. See `REBUILD_NOTES.md` for the reassessment and remaining work.
+You can also type into the message box and press **Send**. Typed messages use Gemini online and retain a short conversation history for the current window. Typed commands use the existing local allowlist, with typed yes/no confirmation for searches. Typed and voice sessions currently have separate conversation histories and confirmations.
 
 Select **Test voice** to check recognition without the wake word. Wait for the beep and say a sentence; the audio goes to the configured online provider, the transcript appears in the Activity panel, and no action is executed. This helps distinguish wake-word problems from microphone or transcription problems. Stop any existing voice listener first. JARVIS currently waits about 1.4 seconds of detected quiet before transcription; pauses longer than this can split a sentence. Online processing takes additional time and varies with service and network conditions.
 
