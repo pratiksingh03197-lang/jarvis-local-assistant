@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import os
 import re
+from typing import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -200,6 +201,7 @@ def _summarize(
     sources: list[SearchSource],
     model: str,
     ollama_url: str,
+    online_summary: Callable[[str, str], str] | None = None,
 ) -> str:
     language_name = "Hindi in Devanagari script" if language == "hi" else "English"
     evidence = "\n\n".join(
@@ -222,7 +224,10 @@ def _summarize(
     )
 
     try:
-        response = requests.post(
+        if online_summary is not None:
+            answer = online_summary(system_prompt, user_prompt)
+        else:
+            response = requests.post(
             ollama_url,
             json={
                 "model": model,
@@ -235,9 +240,9 @@ def _summarize(
             },
             timeout=OLLAMA_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
-        data = response.json()
-        answer = str(data.get("message", {}).get("content", "")).strip()
+            response.raise_for_status()
+            data = response.json()
+            answer = str(data.get("message", {}).get("content", "")).strip()
         answer = re.sub(r"\s+", " ", answer)[:1200]
         if not answer:
             raise ValueError("Empty summary")
@@ -261,15 +266,15 @@ def _summarize(
                 f"{sources[0].snippet} [1]"
             )
         return answer
-    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
         first_excerpt = sources[0].snippet
         if language == "hi":
             return (
-                "स्थानीय JARVIS सारांश मॉडल उपलब्ध नहीं है। पहला खोज परिणाम कहता है: "
+                "JARVIS सारांश मॉडल उपलब्ध नहीं है। पहला खोज परिणाम कहता है: "
                 f"{first_excerpt} [1]"
             )
         return (
-            "The local JARVIS summary model is unavailable. The first search result says: "
+            "The JARVIS summary model is unavailable. The first search result says: "
             f"{first_excerpt} [1]"
         )
 
@@ -279,6 +284,7 @@ def search_and_summarize(
     language: str,
     model: str,
     ollama_url: str,
+    online_summary: Callable[[str, str], str] | None = None,
 ) -> tuple[str, list[SearchSource]]:
     """Search Google through SerpApi, then summarize the returned snippets locally."""
     cleaned_query = " ".join(query.split())
@@ -290,5 +296,6 @@ def search_and_summarize(
         raise SearchDemoError("Choose Hindi or English for the demo response.")
 
     sources = _search(cleaned_query, language)
-    answer = _summarize(cleaned_query, language, sources, model, ollama_url)
+    answer = _summarize(cleaned_query, language, sources, model, ollama_url, online_summary)
     return answer, sources
+
