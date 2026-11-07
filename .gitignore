@@ -9,6 +9,7 @@ __pycache__/
 # Local configuration and credentials
 .env
 .env.*
+.groq.env
 !.env.example
 
 # Downloaded/custom model weights and caches
@@ -36,3 +37,4 @@ jarvis_before_*.py
 .vscode/
 Thumbs.db
 Desktop.ini
+
