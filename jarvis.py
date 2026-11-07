@@ -1,7 +1,7 @@
 # =====================================================
 # PROJECT JARVIS - PERSONAL AI ASSISTANT
-# VERSION 4.1
-# Local wake word + Hindi/English/Hinglish ASR
+# VERSION 4.2
+# Local wake word + optional Gemini online Hindi/English/Hinglish ASR
 # Safe, allowlisted Windows actions
 # =====================================================
 
@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 import webbrowser
 import winsound
 from collections import deque
@@ -26,6 +27,15 @@ from serpapi_live_search import (
     detect_response_language,
     search_and_summarize,
 )
+from online_gemini import (
+    GeminiOnline,
+    OnlineServiceError,
+    OnlineSetupError,
+    load_gemini_config,
+)
+from reply_language import response_language, language_instruction, localize_control_reply
+from online_provider import (create_online_client, groq_key, provider_name,
+                             GROQ_SPEECH_MODEL, GROQ_COMPARISON_MODEL)
 
 import numpy as np
 import pyttsx3
@@ -60,6 +70,9 @@ OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 GOOGLE_HOME_URL = "https://www.google.com/"
 YOUTUBE_HOME_URL = "https://www.youtube.com/"
 YOUTUBE_SEARCH_URL = "https://www.youtube.com/results?search_query="
+# Fixed, public sample for an explicit request to play any video. This opens
+# a video page; the browser or YouTube may still require the user to press Play.
+YOUTUBE_SAMPLE_VIDEO_URL = "https://www.youtube.com/watch?v=iTHUUjTA-LI"
 ALLOWED_BROWSER_URL_PREFIXES = (
     GOOGLE_HOME_URL,
     "https://www.google.com/search?",
@@ -104,7 +117,7 @@ PRE_ROLL_SECONDS = 0.75
 MAX_WAIT_SECONDS = 12.0
 MAX_COMMAND_SECONDS = 45.0
 MIN_COMMAND_SECONDS = 0.75
-END_SILENCE_SECONDS = 2.8
+END_SILENCE_SECONDS = 1.4
 
 # VAD mode: 0 is most permissive, 3 is most aggressive.
 VAD_MODE = 1
@@ -121,10 +134,9 @@ WHISPER_CPU_THREADS = min(4, os.cpu_count() or 4)
 WHISPER_BEAM_SIZE = 5
 
 SYSTEM_PROMPT = """
-You are JARVIS, a local personal AI assistant.
+You are JARVIS, a personal AI assistant.
 
-You understand English, Hindi, and Hinglish. Reply in concise, simple English
-so the installed Windows voice can speak clearly.
+You understand English, Hindi, and Hinglish. Follow the requested reply language.
 
 You help with productivity, business planning, research, analysis, and daily
 assistance. You do not execute operating-system commands, browse private data,
@@ -146,6 +158,14 @@ TRANSCRIPTION_PROMPT = (
 )
 
 conversation_history: list[dict[str, str]] = []
+manual_finish = threading.Event()
+
+
+def _listen_for_manual_finish() -> None:
+    """Receive explicit finish requests from the desktop app, not speech."""
+    for line in sys.stdin:
+        if line.strip() == 'finish':
+            manual_finish.set()
 
 
 # =====================================================
@@ -566,7 +586,7 @@ def _adaptive_speech_threshold(noise_samples: deque[float]) -> float:
     if not noise_samples:
         return MIN_AUDIO_RMS
     noise_floor = float(np.median(np.asarray(noise_samples, dtype=np.float32)))
-    return max(MIN_AUDIO_RMS, min(0.05, noise_floor * NOISE_MULTIPLIER + 0.0005))
+    return max(MIN_AUDIO_RMS, min(0.30, noise_floor * NOISE_MULTIPLIER + 0.0005))
 
 
 def record_command(mic: Microphone) -> np.ndarray:
@@ -574,16 +594,8 @@ def record_command(mic: Microphone) -> np.ndarray:
     Record a natural spoken command. The VAD is used only to find boundaries;
     every frame between the pre-roll and post-speech tail is preserved.
     """
-    print("\nJARVIS ACTIVATED!")
-    try:
-        winsound.Beep(1000, 150)
-    except RuntimeError:
-        pass
-
-    # Let the beep decay before opening the microphone, avoiding an audio-feedback
-    # false start on laptop speakers.
-    time.sleep(0.12)
-    print("Speak normally. JARVIS waits for you to finish.")
+    manual_finish.clear()
+    print("\nJARVIS ACTIVATED! Please wait for the beep before speaking.")
 
     vad = webrtcvad.Vad(VAD_MODE)
     pre_roll = deque(
@@ -597,10 +609,37 @@ def record_command(mic: Microphone) -> np.ndarray:
     speech_started_at: Optional[float] = None
     last_voice_at: Optional[float] = None
     overflow_count = 0
-    waiting_started_at = time.monotonic()
+    waiting_started_at = 0.0
+    waiting_max_rms = 0.0
+    waiting_max_peak = 0.0
 
     with _open_input_stream(mic, COMMAND_FRAME_SAMPLES) as stream:
+        # Measure room noise before the beep, when the user has been asked to
+        # wait. VAD alone can classify continuous background noise as speech.
+        # These frames are used only for levels and are never sent or saved.
+        for _ in range(NOISE_CALIBRATION_FRAMES):
+            frame, overflowed = _read_processing_frame(stream, mic, COMMAND_FRAME_SAMPLES)
+            overflow_count += int(overflowed)
+            if len(frame) == COMMAND_FRAME_SAMPLES:
+                noise_samples.append(audio_metrics(frame)['rms'])
+        try:
+            winsound.Beep(1000, 150)
+        except RuntimeError:
+            pass
+        # Flush the beep and its brief echo. The capture stream remains open.
+        for _ in range(4):
+            _, overflowed = _read_processing_frame(stream, mic, COMMAND_FRAME_SAMPLES)
+            overflow_count += int(overflowed)
+        print("Speak normally. JARVIS waits for you to finish.")
+        print("You can also click Done speaking to finish this command immediately.")
+        waiting_started_at = time.monotonic()
         while True:
+            if manual_finish.is_set():
+                if not speech_started:
+                    print("No speech was captured before Done speaking was pressed.")
+                    return np.array([], dtype=np.float32)
+                print("Finished speaking; processing your command.")
+                break
             frame, overflowed = _read_processing_frame(
                 stream, mic, COMMAND_FRAME_SAMPLES
             )
@@ -608,26 +647,26 @@ def record_command(mic: Microphone) -> np.ndarray:
             if len(frame) != COMMAND_FRAME_SAMPLES:
                 continue
 
-            frame_rms = audio_metrics(frame)["rms"]
+            frame_metrics = audio_metrics(frame)
+            frame_rms = frame_metrics["rms"]
+            if not speech_started:
+                waiting_max_rms = max(waiting_max_rms, frame_rms)
+                waiting_max_peak = max(waiting_max_peak, frame_metrics["peak"])
             vad_speech = vad.is_speech(frame.tobytes(), PROCESSING_SAMPLE_RATE)
 
-            # Learn a short room-noise baseline before trusting level alone.
-            # WebRTC VAD remains active during this period, so normal immediate
-            # speech is still detected and pre-roll preserves its beginning.
-            calibrating_noise = (
-                not speech_started and len(noise_samples) < NOISE_CALIBRATION_FRAMES
-            )
-            if calibrating_noise:
+            # Update the pre-beep noise estimate only on non-voice waiting frames.
+            if not speech_started and not vad_speech:
                 noise_samples.append(frame_rms)
-                energy_speech = False
-            else:
-                energy_speech = frame_rms >= _adaptive_speech_threshold(noise_samples)
-
-            is_speech = vad_speech or energy_speech
+            calibrated = len(noise_samples) >= NOISE_CALIBRATION_FRAMES
+            threshold = _adaptive_speech_threshold(noise_samples)
+            # Energy helps catch softer words only with a valid noise baseline.
+            # Once speaking has started, both VAD and energy must clear a gentle
+            # noise floor, so silence or faint VAD artifacts do not extend a turn.
+            noise_floor = float(np.median(noise_samples)) if calibrated else 0.0
+            audible = frame_rms >= max(0.0010, noise_floor * 1.7)
+            energy_speech = calibrated and frame_rms >= threshold
+            is_speech = (vad_speech and audible) or energy_speech
             now = time.monotonic()
-
-            if not speech_started and not is_speech and not calibrating_noise:
-                noise_samples.append(frame_rms)
 
             if not speech_started:
                 pre_roll.append(frame)
@@ -645,6 +684,15 @@ def record_command(mic: Microphone) -> np.ndarray:
 
                 if now - waiting_started_at >= MAX_WAIT_SECONDS:
                     print("No speech detected.")
+                    print(
+                        f"Microphone input while waiting: max RMS {waiting_max_rms:.5f}, "
+                        f"peak {waiting_max_peak:.5f}."
+                    )
+                    if waiting_max_peak < 0.0002:
+                        print(
+                            "The microphone is returning silence. Check whether the "
+                            "Windows microphone is muted or the wrong input is selected."
+                        )
                     return np.array([], dtype=np.float32)
 
                 continue
@@ -661,7 +709,7 @@ def record_command(mic: Microphone) -> np.ndarray:
                 speech_duration >= MIN_COMMAND_SECONDS
                 and now - last_voice_at >= END_SILENCE_SECONDS
             ):
-                print("End of speech detected.")
+                print(f"End of speech detected after {END_SILENCE_SECONDS:.1f}s of quiet.")
                 break
 
             if speech_duration >= MAX_COMMAND_SECONDS:
@@ -773,7 +821,7 @@ def _transcription_score(
     return average_logprob - highest_no_speech + language_bonus
 
 
-def recognize_speech(
+def _recognize_speech_locally(
     whisper: WhisperModel, audio: np.ndarray, language: Optional[str]
 ) -> str:
     prepared = _prepare_audio_for_whisper(audio)
@@ -832,6 +880,67 @@ def recognize_speech(
         print("Recognition confidence was too low. Please repeat the command.")
         return ""
 
+    print(f"\nYOU: {recognized_text}")
+    return recognized_text
+
+
+def recognize_speech(
+    whisper: WhisperModel,
+    audio: np.ndarray,
+    language: Optional[str],
+    online_client: Optional[GeminiOnline] = None,
+    online_only: bool = False,
+    diagnostic: bool = False,
+) -> str:
+    """Transcribe an activated command using Gemini when online mode is active.
+
+    The wake listener and recording boundaries stay local.  Gemini receives only
+    this completed in-memory command, never standby/background microphone audio.
+    Auto mode falls back to the existing local recognizer if the online service
+    is unavailable; explicit online mode does not silently change back to local.
+    """
+    if online_client is None:
+        return _recognize_speech_locally(whisper, audio, language)
+
+    prepared = _prepare_audio_for_whisper(audio)
+    if len(prepared) == 0:
+        print("No usable speech was captured.")
+        return ""
+
+    print(f"\nUnderstanding your speech online with {provider_name(online_client)}...")
+    transcription_started = time.monotonic()
+    try:
+        recognized_text = online_client.transcribe_command(prepared, language=language)
+    except OnlineServiceError as error:
+        print(f"Online transcription unavailable: {error}")
+        if online_only:
+            print("No command was sent to local Whisper. Please try again.")
+            return ""
+        print("Falling back to local Whisper for this command.")
+        return _recognize_speech_locally(whisper, audio, language)
+
+    if diagnostic:
+        # A voice test never executes text, even if it resembles a command.
+        # Keep control characters out of the display while showing the actual
+        # rejected transcript so a recognition failure can be diagnosed.
+        safe_text = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', recognized_text)
+        print(f"\nVOICE TEST HEARD: {safe_text}")
+        detected = getattr(online_client, 'last_transcription_language', None)
+        if detected:
+            print(f"Detected language: {detected}")
+
+    if (
+        not _has_meaningful_spoken_text(recognized_text)
+        or _looks_like_repetitive_hallucination(recognized_text)
+    ):
+        if re.search(r'[\u0600-\u06ff]', recognized_text):
+            print("The transcript used an unsupported script. Try the Hindi language setting.")
+        else:
+            print("Online transcription was not a meaningful command. Please try again.")
+        return ""
+
+    print(f"Language setting: {language or 'automatic Hindi/English/Hinglish'}")
+    print(f"Online transcription took {time.monotonic() - transcription_started:.1f}s.")
     print(f"\nYOU: {recognized_text}")
     return recognized_text
 # =====================================================
@@ -1019,6 +1128,13 @@ def control_computer(
     is sent to the site.
     """
     command = normalize_command(user_text)
+    # Remove common direct-address/polite phrases, without treating questions
+    # such as "explain how to open" as permission to launch an application.
+    command = re.sub(
+        r'^(?:(?:hey\s+)?jarvis\s+)?(?:(?:please|kindly)\s+)?'
+        r'(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?',
+        '', command, count=1,
+    ).strip()
     now = time.monotonic()
 
     if pending is not None:
@@ -1084,6 +1200,42 @@ def control_computer(
             None,
         )
 
+    # Match the user's direct Hinglish request as an explicit, bounded action.
+    # Do not infer a video topic, run commands, or act on requests framed as
+    # explanations. The URL is a fixed public sample, not model-generated.
+    any_video_request = re.fullmatch(
+        r'(?:chrome|क्रोम)\s+(?:kholo|खोलो)\s+'
+        r'(?:aur|और|and)\s+(?:(?:usme|उसमें|isme|इसमें)\s+)?'
+        r'(?:youtube|यूट्यूब)\s+(?:pe|par|पर|पे)\s+'
+        r'(?:koi|ko[yi]|oi|कोई)\s+(?:bhi|भी)\s+'
+        r'(?:video|वीडियो)\s+(?:chalao|चलाओ|chala|चलाओगे)',
+        command,
+    )
+    if any_video_request:
+        if _open_allowed_url(YOUTUBE_SAMPLE_VIDEO_URL):
+            return (
+                'Opening a sample YouTube video about Earth in Chrome. '
+                'If it does not start automatically, press Play on the video.',
+                None,
+            )
+        return 'I could not open the browser.', None
+
+    # Direct Hindi and Hinglish app-open requests use the same fixed allowlist.
+    hindi_open = re.fullmatch(
+        r'(?:chrome|क्रोम|youtube|यूट्यूब)\s+(?:kholo|खोलो|खोलिए)', command
+    )
+    if hindi_open:
+        action = 'youtube' if ('youtube' in command or 'यूट्यूब' in command) else 'chrome'
+        return launch_safe_action(action), None
+
+    # Whisper may mix Latin app names and Hindi action words in the same turn.
+    if re.fullmatch(
+        r'(?:chrome|क्रोम)\s+(?:kholo|खोलो|खोलिए)\s+'
+        r'(?:aur|और|and|then)\s+(?:youtube|यूट्यूब)\s+(?:kholo|खोलो|खोलिए)',
+        command,
+    ):
+        return ' '.join((launch_safe_action('chrome'), launch_safe_action('youtube'))), None
+
     # This composite pattern must be checked before the one-action commands
     # below so "open Chrome then open YouTube then find a video..." is handled
     # as the intended sequence.
@@ -1127,6 +1279,24 @@ def control_computer(
         )
 
     if _has_open_intent(command):
+        # Only execute a multi-step open request if every step independently
+        # names one of the fixed allowlisted actions.
+        parts = re.split(r'\s+(?:and then|then|and)\s+', command)
+        if len(parts) > 1:
+            fixed = {
+                'chrome': 'chrome', 'google chrome': 'chrome',
+                'youtube': 'youtube', 'google': 'google',
+                'calculator': 'calculator', 'notepad': 'notepad',
+                'file explorer': 'explorer', 'settings': 'settings',
+            }
+            actions = []
+            for part in parts:
+                match = re.fullmatch(r'(?:open|launch|start)\s+(?:the\s+)?(.+)', part)
+                if not match or match.group(1) not in fixed:
+                    return ('I can only run the supported open commands in a sequence. '
+                            'Please ask for each other action separately.', None)
+                actions.append(fixed[match.group(1)])
+            return ' '.join(launch_safe_action(action) for action in actions), None
         if "chrome" in command:
             return launch_safe_action("chrome"), None
         if _contains_any(command, ("notepad", "नोटपैड")):
@@ -1171,11 +1341,18 @@ def control_computer(
 def run_serpapi_search(query: str, language: str) -> str:
     """Run an already-confirmed search and return a short spoken response."""
     try:
+        online_summary = None
+        client = create_online_client(BASE_DIR)
+        if client is not None:
+            online_summary = lambda system, user: client.chat(
+                system, [{"role": "user", "content": user}]
+            )
         answer, sources = search_and_summarize(
             query,
             language,
             model=AI_MODEL,
             ollama_url=OLLAMA_URL,
+            online_summary=online_summary,
         )
     except SearchDemoError as error:
         return str(error)
@@ -1205,6 +1382,18 @@ def speak(voice: pyttsx3.Engine, text: str) -> None:
         return
 
     print(f"\nJARVIS: {text}")
+    try:
+        from speech_output import speak_hindi_online, speak_english_online
+        if re.search(r"[\u0900-\u097f]", text):
+            speak_hindi_online(text)
+        else:
+            speak_english_online(text)
+        return
+    except Exception:
+        if re.search(r"[\u0900-\u097f]", text):
+            print("Online Hindi voice unavailable. Check internet and sound output; the reply is shown above.")
+            return
+        print("Online voice unavailable; using the Windows voice for this reply.")
     default_voice_id = None
     try:
         default_voice_id = voice.getProperty("voice")
@@ -1273,14 +1462,9 @@ def run_typed_search_demo() -> int:
         speak(voice, run_serpapi_search(question, language))
 
 
-def ask_jarvis(user_text: str) -> str:
-    global conversation_history
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages += conversation_history[-10:]
-    messages.append({"role": "user", "content": user_text})
-
-    print("\nJARVIS is thinking...")
+def _ask_ollama(messages: list[dict[str, str]]) -> str:
+    """Ask the original local assistant model using an already-built history."""
+    print("\nJARVIS is thinking locally...")
     response = requests.post(
         OLLAMA_URL,
         json={
@@ -1292,8 +1476,45 @@ def ask_jarvis(user_text: str) -> str:
         timeout=180,
     )
     response.raise_for_status()
+    return response.json()["message"]["content"].strip()
 
-    answer = response.json()["message"]["content"].strip()
+
+def ask_jarvis(
+    user_text: str,
+    online_client: Optional[GeminiOnline] = None,
+    online_only: bool = False,
+) -> str:
+    """Answer normally through Gemini online or Ollama locally.
+
+    Safe computer actions have already been handled before this function runs,
+    so the cloud model receives text only and cannot operate Windows directly.
+    """
+    global conversation_history
+
+    conversation = conversation_history[-10:] + [
+        {"role": "user", "content": user_text}
+    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation
+
+    if online_client is not None:
+        try:
+            print(f"\nJARVIS is thinking online with {provider_name(online_client)}...")
+            answer = online_client.chat(
+                SYSTEM_PROMPT + '\n' + language_instruction(response_language(user_text)),
+                conversation,
+            )
+        except OnlineServiceError as error:
+            print(f"Online chat unavailable: {error}")
+            if online_only:
+                return (
+                    "The online assistant is unavailable. I did not switch to local "
+                    "mode. Please check the internet connection and try again."
+                )
+            print("Falling back to local Ollama for this answer.")
+            answer = _ask_ollama(messages)
+    else:
+        answer = _ask_ollama(messages)
+
     conversation_history.extend(
         [
             {"role": "user", "content": user_text},
@@ -1380,6 +1601,16 @@ def parse_arguments() -> argparse.Namespace:
         help="Run an explicit, in-memory microphone level test; no audio is saved.",
     )
     parser.add_argument(
+        "--voice-check",
+        action="store_true",
+        help="Record one spoken test after a beep and transcribe it online; do not execute it.",
+    )
+    parser.add_argument(
+        "--manual-finish",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--mic-test-seconds",
         type=float,
         default=6.0,
@@ -1400,6 +1631,15 @@ def parse_arguments() -> argparse.Namespace:
         help="Keep auto for Hindi/English/Hinglish; force hi or en only to test.",
     )
     parser.add_argument(
+        "--mode",
+        choices=("auto", "online", "local"),
+        default=os.environ.get("JARVIS_MODE", "auto").casefold(),
+        help=(
+            "auto uses Groq when GROQ_API_KEY is configured, otherwise Gemini; "
+            "online requires a provider, and local uses on-device processing."
+        ),
+    )
+    parser.add_argument(
         "--wake-debug",
         action="store_true",
         help="Print wake-model scores and local audio level once per second.",
@@ -1415,6 +1655,9 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     args = parse_arguments()
 
+    if args.manual_finish:
+        threading.Thread(target=_listen_for_manual_finish, daemon=True).start()
+
     if args.list_devices:
         list_microphones()
         return 0
@@ -1429,7 +1672,7 @@ def main() -> int:
         return 2
 
     print("\n===================================")
-    print("       JARVIS AI SYSTEM v4.1")
+    print("       JARVIS AI SYSTEM v4.2")
     print("===================================")
     print(
         f"Selected microphone: [{mic.index}] {mic.name} | {mic.hostapi} | "
@@ -1438,21 +1681,81 @@ def main() -> int:
     if mic.is_resampled:
         print(f"Local resampling: {mic.capture_rate // 1000} kHz -> 16 kHz")
 
+    cloud_configured = bool(groq_key(BASE_DIR) or load_gemini_config(BASE_DIR))
+
     if args.show_config:
-        print(f"Whisper model: {args.model}")
+        display_model = WAKE_FALLBACK_MODEL if args.mode == "online" else args.model
+        print(f"Whisper model: {display_model}")
         print(f"Whisper CPU threads: {WHISPER_CPU_THREADS}")
         print(f"Language mode: {args.language}")
         print(f"Wake threshold: {WAKE_THRESHOLD}")
+        print(f"End-of-speech quiet time: {END_SILENCE_SECONDS:.1f} seconds")
+        if args.mode == "local":
+            print("Cloud mode: off (forced local)")
+        elif cloud_configured:
+            print(f"Cloud mode: {args.mode} ({'Groq' if groq_key(BASE_DIR) else 'Gemini'} key found; not tested here)")
+        else:
+            print(f"Cloud mode: {args.mode} (no Gemini key found)")
         return 0
 
     if args.mic_test:
         microphone_test(mic, args.mic_test_seconds)
         return 0
 
+    online_only = args.mode == "online"
+    online_client: Optional[GeminiOnline] = None
+    if args.mode != "local":
+        if not cloud_configured:
+            if online_only:
+                print(
+                    "Online mode setup error: no Groq or Gemini API key was found."
+                )
+                return 4
+        else:
+            try:
+                online_client = create_online_client(BASE_DIR)
+            except OnlineSetupError as error:
+                if online_only:
+                    print(f"Online mode setup error: {error}")
+                    return 4
+                print(f"Gemini is unavailable; using local mode instead: {error}")
+
+    if args.voice_check:
+        if online_client is None:
+            print("Voice check needs a configured online key and online mode.")
+            return 4
+        print("\nVOICE CHECK: After the beep, say a complete sentence.")
+        print(f"Your test audio is sent to {provider_name(online_client)} for transcription; no command will be executed.")
+        if provider_name(online_client) == 'Groq':
+            print("The test compares two Groq speech models, using two free-plan requests.")
+        audio = record_command(mic)
+        test_language = None if args.language == 'auto' else args.language
+        text = recognize_speech(None, audio, test_language, online_client, True, diagnostic=True)
+        if provider_name(online_client) == 'Groq' and len(audio):
+            prepared = _prepare_audio_for_whisper(audio)
+            if len(prepared):
+                try:
+                    comparison = online_client.transcribe_command(
+                        prepared, language=test_language, model=GROQ_COMPARISON_MODEL
+                    )
+                    safe_comparison = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', comparison)
+                    print(f"\nALTERNATIVE (faster model): {safe_comparison}")
+                    print("The alternatives are for comparison only; no action was run.")
+                except OnlineServiceError as error:
+                    print(f"Could not compare the faster model: {error}")
+        if text:
+            print("VOICE CHECK COMPLETE. Compare YOU above with what you said.")
+            return 0
+        print("VOICE CHECK: no usable transcription. Review the message above and try again.")
+        return 1
+
+    # Cloud-only mode still uses a small local model for the private wake-word
+    # fallback, but avoids loading the larger full-command local recognizer.
+    runtime_whisper_model = WAKE_FALLBACK_MODEL if online_only else args.model
     try:
         wake_detector = load_wake_detector()
-        whisper = load_whisper_model(args.model)
-        wake_whisper = load_wake_fallback_model(whisper, args.model)
+        whisper = load_whisper_model(runtime_whisper_model)
+        wake_whisper = load_wake_fallback_model(whisper, runtime_whisper_model)
         voice = make_voice()
     except Exception as error:
         print(f"Startup error: {error}")
@@ -1460,10 +1763,26 @@ def main() -> int:
 
     language = None if args.language == "auto" else args.language
     pending_action: Optional[PendingAction] = None
+    pending_language: Optional[str] = None
 
-    print("\nJARVIS IS ONLINE")
+    print("\nJARVIS READY")
     print("Features: wake word, adaptive recording, Hindi/English/Hinglish ASR,")
-    print("local Ollama chat, confirmed SerpApi search, and safe computer control.")
+    print("confirmed searches, and safe computer control.")
+    if online_client is not None:
+        print(f"Cloud mode: ON — {provider_name(online_client)} transcribes commands and handles normal chat.")
+        print(
+            "Privacy: only completed commands after activation, plus normal chat "
+            "text, leave this laptop. Wake listening and computer control stay local."
+        )
+        print(
+            f"The command audio is held in memory and sent directly to {provider_name(online_client)} "
+            "without creating a local recording or a separate uploaded file."
+        )
+        print(
+            "Do not use free cloud mode for passwords, banking, or private dictation."
+        )
+    else:
+        print("Cloud mode: OFF — using local Whisper and local Ollama.")
     print("Wake options: 'Jarvis' (local speech fallback) or 'Hey Jarvis'.")
     print("Press Ctrl+C to stop JARVIS.")
 
@@ -1474,7 +1793,9 @@ def main() -> int:
             )
 
             audio = record_command(mic)
-            user_text = recognize_speech(whisper, audio, language)
+            user_text = recognize_speech(
+                whisper, audio, language, online_client, online_only
+            )
             if not user_text:
                 print("\nNo valid command. Returning to standby.")
                 continue
@@ -1484,15 +1805,20 @@ def main() -> int:
                 speak(voice, "Shutting down JARVIS. Goodbye.")
                 return 0
 
+            prior_pending = pending_action
+            reply_language = response_language(user_text)
+            if prior_pending is not None and (_is_yes(command) or _is_no(command)):
+                reply_language = pending_language or reply_language
             control_reply, pending_action = control_computer(
                 user_text, pending_action
             )
+            pending_language = reply_language if pending_action is not None else None
             if control_reply is not None:
-                speak(voice, control_reply)
+                speak(voice, localize_control_reply(control_reply, reply_language))
                 time.sleep(0.6)
                 continue
 
-            answer = ask_jarvis(user_text)
+            answer = ask_jarvis(user_text, online_client, online_only)
             speak(voice, answer)
 
             # Avoid re-triggering on JARVIS's own final speech audio.
@@ -1513,3 +1839,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
