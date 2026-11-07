@@ -22,7 +22,7 @@ JARVIS connects speech recognition, local language-model conversations, spoken r
 
 ![JARVIS voice pipeline](docs/architecture.svg)
 
-**Stack:** Python · Gemini API (optional) · SerpApi Google Search API · requests · faster-whisper · openWakeWord / ONNX Runtime · Ollama · WebRTC VAD · sounddevice · NumPy · SciPy · pyttsx3
+**Stack:** Python · Gemini API (optional) · Groq API (optional) · SerpApi Google Search API · faster-whisper · openWakeWord / ONNX Runtime · Ollama · WebRTC VAD · sounddevice · NumPy · SciPy · pyttsx3 · edge-tts
 
 The default speech model is Whisper `small`, using CPU `int8` inference. The main speech loader can fall back to `base`; the short wake fallback also uses `base`. Conversations use `qwen3.5:2b` through `http://127.0.0.1:11434/api/chat`.
 
@@ -177,15 +177,21 @@ Recognition and responsiveness still vary with microphone placement, background 
 ## Project files
 
 ```text
-jarvis.py               Voice pipeline, command router, and local conversation loop
-online_gemini.py        Optional Gemini cloud speech and text client; no computer controls
-serpapi_live_search.py  Confirmed SerpApi request, source extraction, local summary
-Start_JARVIS.cmd        Windows launcher; forwards optional arguments
-Start_JARVIS_Online.cmd Cloud-only Windows launcher; requires a Gemini API key
-Set_Up_Online_JARVIS.cmd Creates/opens the private local key settings file in Notepad
-requirements.txt       Python dependencies
-.env.example           Local SerpApi key template; copy to ignored .env
-.gitignore             Excludes local environments, keys, models, recordings, logs
+jarvis.py               Voice capture, transcription, command routing and assistant loop
+jarvis_app.py           Windows desktop preview for typed chat and voice controls
+assistant_session.py    Typed conversation and action-confirmation state
+online_gemini.py        Optional Gemini speech and chat client
+online_provider.py      Optional Groq speech and chat provider
+reply_language.py       Hindi, English and Hinglish reply-language selection
+speech_output.py        Hindi/English speech output with local fallback
+serpapi_live_search.py  Confirmed SerpApi search, result links and grounded summaries
+Open_JARVIS_App.cmd     Desktop preview launcher
+Start_JARVIS.cmd        Automatic/local-mode voice launcher
+Start_JARVIS_Online.cmd Online voice launcher
+Set_Up_Online_JARVIS.cmd Creates/opens local API-key settings in Notepad
+requirements.txt        Python dependencies
+.env.example            Placeholder template for optional private API keys
+.gitignore              Excludes local environments, keys, models, recordings and logs
 ```
 
 No model weights, audio recordings, local environments, or development backups are included. An optional `jarvis_wake.onnx` can be loaded from this folder if a user supplies a suitable model; no custom model is distributed here.
